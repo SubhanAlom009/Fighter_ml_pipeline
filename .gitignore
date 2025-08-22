@@ -1,0 +1,31 @@
+# Python virtual environment
+.venv/
+venv/
+env/
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# IDE and editor directories
+.idea/
+.vscode/
+
+# Data files (you shouldn't commit your raw data)
+*.csv
+*.xlsx
+*.xls
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Build and distribution artifacts
+/dist/
+/build/
+*.egg-info
