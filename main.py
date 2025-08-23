@@ -227,12 +227,19 @@ with st.sidebar:
         help="Choose one or more ways to summarize stats."
     )
     
-    last_n_fights_list = st.multiselect(
-        "Select 'Last N Fights' Windows",
-        [0, 3, 5, 10, 20],
-        default=[10],
-        help="Select one or more lookback periods. 0 means entire career history."
+    # FIX: Change to text input for flexible number entry
+    last_n_fights_input = st.text_input(
+        "Enter 'Last N Fights' Windows (comma-separated)",
+        value='10',
+        help="Enter numbers like 0, 3, 5, 10. 0 means entire career history."
     )
+    last_n_fights_list = []
+    if last_n_fights_input:
+        try:
+            last_n_fights_list = [int(x.strip()) for x in last_n_fights_input.split(',')]
+        except ValueError:
+            st.error("Invalid input. Please enter only numbers separated by commas.")
+            last_n_fights_list = []
 
     shuffle_perspectives = st.checkbox("Shuffle fighter perspectives (x vs y)", value=False, help="Randomize the order of the two rows for each fight.")
 
@@ -265,7 +272,7 @@ if uploaded_file is not None:
             if not aggregation_types:
                 st.warning("Please select at least one aggregation type.")
             elif not last_n_fights_list:
-                st.warning("Please select at least one 'Last N Fights' window.")
+                st.warning("Please enter at least one 'Last N Fights' window.")
             else:
                 with st.spinner(f"Generating features... This may take a moment on the first run."):
                     agg_tuple = tuple(sorted(aggregation_types))
