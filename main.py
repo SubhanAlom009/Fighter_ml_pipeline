@@ -2,7 +2,10 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from io import BytesIO
+import random
 
+# --- Caching Decorators for Optimization ---
+@st.cache_data
 def preprocess_raw_data(df):
     """
     Preprocesses the raw fighter data.
@@ -41,13 +44,6 @@ def preprocess_raw_data(df):
     # Sort by date AND Fight ID to create a stable, guaranteed chronological order
     df = df.sort_values(by=['date', 'Fight ID']).reset_index(drop=True)
     return df
-
-def calculate_implied_probability(odds):
-    """Calculates the implied win probability from American odds."""
-    if odds >= 0:
-        return 100 / (odds + 100)
-    else:
-        return abs(odds) / (abs(odds) + 100)
 
 def calculate_historical_stats(fighter_df, aggregation_types, last_n_fights):
     """
@@ -98,7 +94,7 @@ def calculate_historical_stats(fighter_df, aggregation_types, last_n_fights):
     }
 
     for agg_type in aggregation_types:
-        agg_func_name = agg_type.lower()[:3] if agg_type == 'Average' else agg_type.lower()
+        agg_func_name = 'avg' if agg_type == 'Average' else agg_type.lower()
         agg_method = agg_map[agg_type]
         
         for col in stat_columns:
@@ -112,13 +108,20 @@ def calculate_historical_stats(fighter_df, aggregation_types, last_n_fights):
     return pd.Series(stats).fillna(0)
 
 
-def create_training_data(df, aggregation_types, last_n_fights):
+# --- Caching Decorators for Optimization ---
+@st.cache_data
+def create_training_data(_df, aggregation_types, last_n_fights, shuffle_perspectives):
     """
     Transforms the raw fight data into a training-ready format with organized columns.
     This logic creates TWO rows per fight, one for each fighter's perspective.
+    The underscore on _df is a convention to tell Streamlit's caching to hash by the data's contents.
     """
+    df = _df.copy() # Work on a copy to avoid modifying the cached object
     processed_fights = []
-    progress_bar = st.progress(0)
+    
+    # Use st.empty() for a progress bar that can be managed outside the main display area
+    progress_bar_placeholder = st.sidebar.empty()
+    progress_bar_placeholder.progress(0)
     total_rows = len(df)
 
     # Iterate through every row in the raw data. Each row is one fighter in a fight.
@@ -165,11 +168,25 @@ def create_training_data(df, aggregation_types, last_n_fights):
             'DOB Year_y': fighter_y_info['Date of Birth'].year if pd.notna(fighter_y_info['Date of Birth']) else 0,
         }
 
-        # --- Robust odds and probability calculation ---
-        odds_x = fighter_x_info.get('odds', 0)
-        odds_y = fighter_y_info.get('odds', 0)
-        prob_x = calculate_implied_probability(odds_x)
-        prob_y = calculate_implied_probability(odds_y)
+        # --- Custom Odds Transformation ---
+        raw_odds_x = fighter_x_info.get('odds', 0)
+        raw_odds_y = fighter_y_info.get('odds', 0)
+        
+        # Apply the custom formula for negative odds
+        if raw_odds_x < 0 and raw_odds_x != 0:
+            odds_x = 10000 / abs(raw_odds_x)
+        else:
+            odds_x = raw_odds_x
+
+        if raw_odds_y < 0 and raw_odds_y != 0:
+            odds_y = 10000 / abs(raw_odds_y)
+        else:
+            odds_y = raw_odds_y
+        
+        # Convert to integers using standard rounding
+        odds_x = int(round(odds_x))
+        odds_y = int(round(odds_y))
+        
         diff_odds = odds_x - odds_y
 
         # --- Calculate differential stats ---
@@ -188,19 +205,28 @@ def create_training_data(df, aggregation_types, last_n_fights):
             'fighter_y_name': fighter_y_info['Fighter Full Name'], 
             'fighter_x_win': int(fighter_x_info['Winner'])
         })
-        fighter_x_data = pd.concat([pd.Series(static_features_x), fighter_x_stats, pd.Series({'odds_x': odds_x, 'implied_probability_x': prob_x})])
-        fighter_y_data = pd.concat([pd.Series(static_features_y), fighter_y_stats, pd.Series({'odds_y': odds_y, 'implied_probability_y': prob_y})])
+        fighter_x_data = pd.concat([pd.Series(static_features_x), fighter_x_stats, pd.Series({'odds_x': odds_x})])
+        fighter_y_data = pd.concat([pd.Series(static_features_y), fighter_y_stats, pd.Series({'odds_y': odds_y})])
         diff_data = pd.concat([pd.Series(diff_static), diff_stats, pd.Series({'diff_odds': diff_odds})])
 
         combined_stats = pd.concat([fight_info, fighter_x_data, fighter_y_data, diff_data])
         processed_fights.append(combined_stats)
 
-        progress_bar.progress((i + 1) / total_rows)
-
+        progress_bar_placeholder.progress((i + 1) / total_rows)
+    
+    progress_bar_placeholder.empty() # Clear the progress bar when done
     final_df = pd.DataFrame(processed_fights).fillna(0)
     
-    # Sort the final dataframe by fight_id to ensure sequential and consistent order
-    final_df = final_df.sort_values(by=['fight_id', 'fighter_x_name']).reset_index(drop=True)
+    # --- Shuffle fighter perspectives if requested ---
+    if shuffle_perspectives:
+        shuffled_list = []
+        # Group by fight_id, then shuffle each group and append
+        for _, group in final_df.groupby('fight_id'):
+            shuffled_list.append(group.sample(frac=1))
+        final_df = pd.concat(shuffled_list).reset_index(drop=True)
+    else:
+        # Sort the final dataframe by fight_id to ensure sequential and consistent order
+        final_df = final_df.sort_values(by=['fight_id', 'fighter_x_name']).reset_index(drop=True)
     
     return final_df
 
@@ -238,18 +264,8 @@ with st.sidebar:
         step=1,
         help="Calculate stats based on the last N fights. Set to 0 to use a fighter's entire history."
     )
-    st.info("ℹ️ To match the original `train.csv`, select only 'Average' and set 'Last Fights' to 0.")
 
-    # --- NEW: Date Filter ---
-    st.header("📅 Date Filter")
-    if 'raw_df' in st.session_state and st.session_state.raw_df is not None:
-        min_date = st.session_state.raw_df['date'].min().date()
-        max_date = st.session_state.raw_df['date'].max().date()
-        date_range = st.date_input("Select date range", [min_date, max_date], min_value=min_date, max_value=max_date)
-    else:
-        st.info("Upload a file to enable date filtering.")
-        date_range = None
-
+    shuffle_perspectives = st.checkbox("Shuffle fighter perspectives (x vs y)", value=False, help="Randomize the order of the two rows for each fight.")
 
 # --- Main App Logic ---
 if 'training_df' not in st.session_state:
@@ -271,7 +287,7 @@ if uploaded_file is not None:
             st.session_state.file_type = 'xlsx'
         
         # Preprocess once and store in session state
-        st.session_state.raw_df = preprocess_raw_data(raw_df.copy())
+        st.session_state.raw_df = preprocess_raw_data(raw_df)
             
         st.success("✅ File uploaded and read successfully!")
 
@@ -282,38 +298,18 @@ if uploaded_file is not None:
             if not aggregation_types:
                 st.warning("Please select at least one aggregation type.")
             else:
-                # --- Apply Date Filter ---
-                filtered_df = st.session_state.raw_df
-                if date_range and len(date_range) == 2:
-                    start_date = pd.to_datetime(date_range[0])
-                    end_date = pd.to_datetime(date_range[1])
-                    filtered_df = filtered_df[(filtered_df['date'] >= start_date) & (filtered_df['date'] <= end_date)]
-
-                with st.spinner(f"Generating features... This is a long process, please wait."):
-                    st.session_state.training_df = create_training_data(filtered_df, aggregation_types, last_n_fights)
+                with st.spinner(f"Generating features... This may take a moment on the first run."):
+                    # Convert list to tuple for caching
+                    agg_tuple = tuple(sorted(aggregation_types))
+                    st.session_state.training_df = create_training_data(st.session_state.raw_df, agg_tuple, last_n_fights, shuffle_perspectives)
                 
                 st.success("🎉 Training data generated successfully!")
 
         if st.session_state.training_df is not None:
             training_df = st.session_state.training_df
             st.subheader("Generated Training Data Preview")
+            st.dataframe(training_df)
 
-            # --- NEW: Column Selector with "ALL" option ---
-            show_all = st.checkbox("Show All Columns", value=False)
-            
-            if show_all:
-                visible_cols = training_df.columns.tolist()
-                st.multiselect("Select columns to display", training_df.columns.tolist(), default=visible_cols, disabled=True)
-            else:
-                default_cols = [col for col in training_df.columns if not ('favorite' in col or 'underdog' in col)]
-                visible_cols = st.multiselect("Select columns to display", training_df.columns.tolist(), default=default_cols)
-            
-            if visible_cols:
-                st.dataframe(training_df[visible_cols])
-            else:
-                st.info("Select one or more columns to display the data.")
-
-            
             # --- Dynamic Download Button ---
             file_extension = st.session_state.file_type
             agg_str = '_'.join([agg.lower() for agg in aggregation_types])
@@ -336,17 +332,62 @@ if uploaded_file is not None:
                 mime=mime,
             )
 
+            # --- Filtered Column and Date View ---
+            st.subheader("📊 Filtered View")
+            
+            # Date Filter
+            min_date = training_df['date'].min().date()
+            max_date = training_df['date'].max().date()
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                start_date = st.date_input("Start date", min_date, min_value=min_date, max_value=max_date)
+            with col2:
+                end_date = st.date_input("End date", max_date, min_value=start_date, max_value=max_date)
+
+            # Column Filter
+            select_all_cols = st.checkbox("Select All Columns")
+            
+            if select_all_cols:
+                filtered_cols = training_df.columns.tolist()
+            else:
+                filtered_cols = st.multiselect(
+                    "Select columns to display", 
+                    training_df.columns.tolist(), 
+                    default=[]
+                )
+            
+            # Apply filters and display
+            view_df = training_df
+            
+            # Apply date filter
+            start_date_ts = pd.to_datetime(start_date)
+            end_date_ts = pd.to_datetime(end_date)
+            date_mask = (view_df['date'] >= start_date_ts) & (view_df['date'] <= end_date_ts)
+            view_df = view_df[date_mask]
+
+            # Check if any filter has been actively used
+            date_filter_active = (start_date != min_date) or (end_date != max_date)
+            cols_filter_active = bool(filtered_cols)
+
+            if date_filter_active or cols_filter_active:
+                # If columns are selected, use them. Otherwise, show all columns.
+                display_cols = filtered_cols if cols_filter_active else training_df.columns.tolist()
+                st.dataframe(view_df[display_cols])
+            else:
+                 st.info("Select columns or change the date range to see a filtered view.")
+            
             # --- Fighter Analysis Section ---
             st.subheader("🔍 Fighter Analysis")
             fighters = sorted(training_df['fighter_x_name'].unique())
             
             col1, col2 = st.columns(2)
             with col1:
-                fighter1 = st.selectbox("Select Fighter 1", fighters, index=0)
+                fighter1 = st.selectbox("Select Fighter 1", fighters, index=None, placeholder="Select fighter...")
             with col2:
-                fighter2 = st.selectbox("Select Fighter 2", fighters, index=1)
+                fighter2 = st.selectbox("Select Fighter 2", fighters, index=None, placeholder="Select fighter...")
 
-            if fighter1 and fighter2:
+            if fighter1 and fighter2 and fighter1 != fighter2:
                 # Find the last fight between them
                 fight_history = training_df[
                     ((training_df['fighter_x_name'] == fighter1) & (training_df['fighter_y_name'] == fighter2)) |
@@ -360,11 +401,10 @@ if uploaded_file is not None:
                     # Ensure fighter1 is always fighter_x for consistent display
                     fighter1_perspective = last_fight[last_fight['fighter_x_name'] == fighter1]
                     if fighter1_perspective.empty:
-                         st.info(f"No direct matchup found where {fighter1} is listed as fighter_x. Showing opponent's perspective.")
-                         fighter1_perspective = last_fight[last_fight['fighter_y_name'] == fighter1]
+                         fighter1_perspective = last_fight[last_fight['fighter_y_name'] == fighter1].rename(columns=lambda c: c.replace('_y', '_temp').replace('_x', '_y').replace('_temp', '_x'))
 
-
-                    st.dataframe(fighter1_perspective[visible_cols])
+                    # Display all columns for the comparison
+                    st.dataframe(fighter1_perspective)
                 else:
                     st.info(f"{fighter1} and {fighter2} have not fought in the selected dataset.")
 
