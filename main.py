@@ -45,106 +45,99 @@ def preprocess_raw_data(df):
     df = df.sort_values(by=['date', 'Fight ID']).reset_index(drop=True)
     return df
 
-def calculate_historical_stats(fighter_df, aggregation_types, last_n_fights):
+def calculate_historical_stats(fighter_df, aggregation_types, last_n_fights_list):
     """
-    Calculates historical stats for a single fighter's past performances,
-    including breakdowns for when they were the favorite or underdog.
+    Calculates historical stats for a single fighter's past performances for multiple lookback windows.
     """
-    # Use only the last N fights if specified. If 0, it uses the whole dataframe.
-    if last_n_fights > 0:
-        fighter_df = fighter_df.tail(last_n_fights)
+    all_stats = {}
+    
+    for last_n in last_n_fights_list:
+        # Use only the last N fights if specified. If 0, it uses the whole dataframe.
+        window_df = fighter_df.copy()
+        if last_n > 0:
+            window_df = window_df.tail(last_n)
 
-    # --- Basic Career Stats ---
-    stats = {}
-    wins = fighter_df[fighter_df['Winner']]
-    losses = fighter_df[~fighter_df['Winner']]
-    stats['NumberOf_Fight'] = len(fighter_df)
-    stats['NumberOf_WIN'] = len(wins)
-    stats['NumberOf_LOSE'] = len(losses)
-    stats['WIN_RATE'] = stats['NumberOf_WIN'] / stats['NumberOf_Fight'] if stats['NumberOf_Fight'] > 0 else 0
+        # --- Basic Career Stats ---
+        wins = window_df[window_df['Winner']]
+        losses = window_df[~window_df['Winner']]
+        all_stats[f'NumberOf_Fight_{last_n}'] = len(window_df)
+        all_stats[f'NumberOf_WIN_{last_n}'] = len(wins)
+        all_stats[f'NumberOf_LOSE_{last_n}'] = len(losses)
+        all_stats[f'WIN_RATE_{last_n}'] = all_stats[f'NumberOf_WIN_{last_n}'] / all_stats[f'NumberOf_Fight_{last_n}'] if all_stats[f'NumberOf_Fight_{last_n}'] > 0 else 0
 
-    # --- NEW: Segment fights by favorite/underdog status ---
-    favorite_fights = fighter_df[fighter_df['odds'] < 0]
-    underdog_fights = fighter_df[fighter_df['odds'] >= 0]
+        # --- Segment fights by favorite/underdog status ---
+        favorite_fights = window_df[window_df['odds'] < 0]
+        underdog_fights = window_df[window_df['odds'] >= 0]
+        win_favorite = favorite_fights[favorite_fights['Winner']]
+        lose_favorite = favorite_fights[~favorite_fights['Winner']]
+        win_underdog = underdog_fights[underdog_fights['Winner']]
+        lose_underdog = underdog_fights[~underdog_fights['Winner']]
 
-    # Further segment by win/loss
-    win_favorite = favorite_fights[favorite_fights['Winner']]
-    lose_favorite = favorite_fights[~favorite_fights['Winner']]
-    win_underdog = underdog_fights[underdog_fights['Winner']]
-    lose_underdog = underdog_fights[~underdog_fights['Winner']]
+        # --- Columns to aggregate ---
+        stat_columns = [
+            'Winning Time', 'Knockdown Total', 'Significant Strike Total Attempted', 'Significant Strike Total Landed',
+            'Takedown Total Attempted', 'Takedown Total Landed', 'Submission Attempted', 'Reversal',
+            'Ground and Cage Control Time', 'Significant Strike Head Attempted', 'Significant Strike Head Landed',
+            'Significant Strike Body Attempted', 'Significant Strike Body Landed', 'Significant Strike Leg Attempted',
+            'Significant Strike Leg Landed', 'Significant Strike Clinch Attempted', 'Significant Strike Clinch Landed',
+            'Significant Strike Ground Attempted', 'Significant Strike Ground Landed'
+        ]
 
-    # --- Columns to aggregate ---
-    stat_columns = [
-        'Winning Time', 'Knockdown Total', 'Significant Strike Total Attempted', 'Significant Strike Total Landed',
-        'Takedown Total Attempted', 'Takedown Total Landed', 'Submission Attempted', 'Reversal',
-        'Ground and Cage Control Time', 'Significant Strike Head Attempted', 'Significant Strike Head Landed',
-        'Significant Strike Body Attempted', 'Significant Strike Body Landed', 'Significant Strike Leg Attempted',
-        'Significant Strike Leg Landed', 'Significant Strike Clinch Attempted', 'Significant Strike Clinch Landed',
-        'Significant Strike Ground Attempted', 'Significant Strike Ground Landed'
-    ]
+        # --- Aggregation Logic ---
+        agg_map = {'Average': 'mean', 'Sum': 'sum', 'Median': 'median'}
 
-    # --- Aggregation Logic ---
-    agg_map = {'Average': 'mean', 'Sum': 'sum', 'Median': 'median'}
+        # --- Calculate stats for all segments ---
+        segments = {
+            '': (wins, losses),
+            '_favorite': (win_favorite, lose_favorite),
+            '_underdog': (win_underdog, lose_underdog)
+        }
 
-    # --- Calculate stats for all segments ---
-    segments = {
-        '': (wins, losses),
-        '_favorite': (win_favorite, lose_favorite),
-        '_underdog': (win_underdog, lose_underdog)
-    }
+        for agg_type in aggregation_types:
+            agg_func_name = 'avg' if agg_type == 'Average' else agg_type.lower()
+            agg_method = agg_map[agg_type]
+            
+            for col in stat_columns:
+                for suffix, (win_df, lose_df) in segments.items():
+                    win_stat_name = f'win_{agg_func_name}_{col.replace(" ", "_")}{suffix}_{last_n}'
+                    lose_stat_name = f'lose_{agg_func_name}_{col.replace(" ", "_")}{suffix}_{last_n}'
+                    
+                    all_stats[win_stat_name] = win_df[col].agg(agg_method) if not win_df.empty else 0
+                    all_stats[lose_stat_name] = lose_df[col].agg(agg_method) if not lose_df.empty else 0
 
-    for agg_type in aggregation_types:
-        agg_func_name = 'avg' if agg_type == 'Average' else agg_type.lower()
-        agg_method = agg_map[agg_type]
-        
-        for col in stat_columns:
-            for suffix, (win_df, lose_df) in segments.items():
-                win_stat_name = f'win_{agg_func_name}_{col.replace(" ", "_")}{suffix}'
-                lose_stat_name = f'lose_{agg_func_name}_{col.replace(" ", "_")}{suffix}'
-                
-                stats[win_stat_name] = win_df[col].agg(agg_method) if not win_df.empty else 0
-                stats[lose_stat_name] = lose_df[col].agg(agg_method) if not lose_df.empty else 0
-
-    return pd.Series(stats).fillna(0)
+    return pd.Series(all_stats).fillna(0)
 
 
 # --- Caching Decorators for Optimization ---
 @st.cache_data
-def create_training_data(_df, aggregation_types, last_n_fights, shuffle_perspectives):
+def create_training_data(_df, aggregation_types, last_n_fights_list, shuffle_perspectives):
     """
     Transforms the raw fight data into a training-ready format with organized columns.
     This logic creates TWO rows per fight, one for each fighter's perspective.
-    The underscore on _df is a convention to tell Streamlit's caching to hash by the data's contents.
     """
-    df = _df.copy() # Work on a copy to avoid modifying the cached object
+    df = _df.copy()
     processed_fights = []
     
-    # Use st.empty() for a progress bar that can be managed outside the main display area
     progress_bar_placeholder = st.sidebar.empty()
     progress_bar_placeholder.progress(0)
     total_rows = len(df)
 
-    # Iterate through every row in the raw data. Each row is one fighter in a fight.
+    # Iterate through every row in the raw data.
     for i, fighter_x_info in df.iterrows():
         fight_id = fighter_x_info['Fight ID']
         fight_date = fighter_x_info['date']
         
-        # Find the opponent's row using a more robust index-based method
         opponent_query = df[(df['Fight ID'] == fight_id) & (df.index != i)]
-        
         if opponent_query.empty:
             continue
         fighter_y_info = opponent_query.iloc[0]
 
-        # --- Get historical data for each fighter ---
         fighter_x_history = df[(df['Fighter Full Name'] == fighter_x_info['Fighter Full Name']) & (df['date'] < fight_date)]
         fighter_y_history = df[(df['Fighter Full Name'] == fighter_y_info['Fighter Full Name']) & (df['date'] < fight_date)]
         
-        # --- Calculate historical stats ---
-        fighter_x_stats = calculate_historical_stats(fighter_x_history, aggregation_types, last_n_fights)
-        fighter_y_stats = calculate_historical_stats(fighter_y_history, aggregation_types, last_n_fights)
+        fighter_x_stats = calculate_historical_stats(fighter_x_history, aggregation_types, last_n_fights_list)
+        fighter_y_stats = calculate_historical_stats(fighter_y_history, aggregation_types, last_n_fights_list)
         
-        # --- Calculate Static Features for each fighter ---
         static_features_x = {
             'Fighter ID_x': fight_id,
             'Age (in days)_x': (fight_date - fighter_x_info['Date of Birth']).days if pd.notna(fighter_x_info['Date of Birth']) else 0,
@@ -168,42 +161,22 @@ def create_training_data(_df, aggregation_types, last_n_fights, shuffle_perspect
             'DOB Year_y': fighter_y_info['Date of Birth'].year if pd.notna(fighter_y_info['Date of Birth']) else 0,
         }
 
-        # --- Custom Odds Transformation ---
         raw_odds_x = fighter_x_info.get('odds', 0)
         raw_odds_y = fighter_y_info.get('odds', 0)
-        
-        # Apply the custom formula for negative odds
-        if raw_odds_x < 0 and raw_odds_x != 0:
-            odds_x = 10000 / abs(raw_odds_x)
-        else:
-            odds_x = raw_odds_x
-
-        if raw_odds_y < 0 and raw_odds_y != 0:
-            odds_y = 10000 / abs(raw_odds_y)
-        else:
-            odds_y = raw_odds_y
-        
-        # Convert to integers using standard rounding
-        odds_x = int(round(odds_x))
-        odds_y = int(round(odds_y))
-        
+        odds_x = 10000 / abs(raw_odds_x) if raw_odds_x < 0 else raw_odds_x
+        odds_y = 10000 / abs(raw_odds_y) if raw_odds_y < 0 else raw_odds_y
+        odds_x, odds_y = int(round(odds_x)), int(round(odds_y))
         diff_odds = odds_x - odds_y
 
-        # --- Calculate differential stats ---
         diff_stats = (fighter_x_stats - fighter_y_stats).add_prefix('diff_')
         diff_static = {f"diff_{k.replace('_x','')}": v - static_features_y.get(k.replace('_x','_y'), 0) for k,v in static_features_x.items() if k != 'Stance_x'}
         
-        # --- Add suffixes to historical stats ---
         fighter_x_stats = fighter_x_stats.add_suffix('_x')
         fighter_y_stats = fighter_y_stats.add_suffix('_y')
         
-        # --- Organize data into logical blocks ---
         fight_info = pd.Series({
-            'fight_id': fight_id, 
-            'date': fight_date, 
-            'fighter_x_name': fighter_x_info['Fighter Full Name'],
-            'fighter_y_name': fighter_y_info['Fighter Full Name'], 
-            'fighter_x_win': int(fighter_x_info['Winner'])
+            'fight_id': fight_id, 'date': fight_date, 'fighter_x_name': fighter_x_info['Fighter Full Name'],
+            'fighter_y_name': fighter_y_info['Fighter Full Name'], 'fighter_x_win': int(fighter_x_info['Winner'])
         })
         fighter_x_data = pd.concat([pd.Series(static_features_x), fighter_x_stats, pd.Series({'odds_x': odds_x})])
         fighter_y_data = pd.concat([pd.Series(static_features_y), fighter_y_stats, pd.Series({'odds_y': odds_y})])
@@ -214,18 +187,15 @@ def create_training_data(_df, aggregation_types, last_n_fights, shuffle_perspect
 
         progress_bar_placeholder.progress((i + 1) / total_rows)
     
-    progress_bar_placeholder.empty() # Clear the progress bar when done
+    progress_bar_placeholder.empty()
     final_df = pd.DataFrame(processed_fights).fillna(0)
     
-    # --- Shuffle fighter perspectives if requested ---
     if shuffle_perspectives:
         shuffled_list = []
-        # Group by fight_id, then shuffle each group and append
         for _, group in final_df.groupby('fight_id'):
             shuffled_list.append(group.sample(frac=1))
         final_df = pd.concat(shuffled_list).reset_index(drop=True)
     else:
-        # Sort the final dataframe by fight_id to ensure sequential and consistent order
         final_df = final_df.sort_values(by=['fight_id', 'fighter_x_name']).reset_index(drop=True)
     
     return final_df
@@ -239,7 +209,7 @@ st.markdown("""
 This app transforms raw, fight-by-fight UFC data into a "training-ready" dataset with advanced filtering and analysis. 
 **How it works:**
 1.  **Upload** your `raw.csv` or `raw.xlsx` file.
-2.  **Choose** your feature engineering parameters on the left. You can now select multiple aggregation types.
+2.  **Choose** your feature engineering parameters on the left. You can now select multiple aggregation and lookback types.
 3.  The app calculates historical stats, odds, and differentials for each fighter *before* every fight.
 4.  Use the new analysis and filtering tools to explore the generated data.
 """)
@@ -257,12 +227,11 @@ with st.sidebar:
         help="Choose one or more ways to summarize stats."
     )
     
-    last_n_fights = st.number_input(
-        "Number of Last Fights to Consider (0 for all)",
-        min_value=0,
-        value=10,
-        step=1,
-        help="Calculate stats based on the last N fights. Set to 0 to use a fighter's entire history."
+    last_n_fights_list = st.multiselect(
+        "Select 'Last N Fights' Windows",
+        [0, 3, 5, 10, 20],
+        default=[10],
+        help="Select one or more lookback periods. 0 means entire career history."
     )
 
     shuffle_perspectives = st.checkbox("Shuffle fighter perspectives (x vs y)", value=False, help="Randomize the order of the two rows for each fight.")
@@ -278,7 +247,6 @@ if 'raw_df' not in st.session_state:
 
 if uploaded_file is not None:
     try:
-        # Read the uploaded file based on its type
         if uploaded_file.name.endswith('.csv'):
             raw_df = pd.read_csv(uploaded_file)
             st.session_state.file_type = 'csv'
@@ -286,7 +254,6 @@ if uploaded_file is not None:
             raw_df = pd.read_excel(uploaded_file)
             st.session_state.file_type = 'xlsx'
         
-        # Preprocess once and store in session state
         st.session_state.raw_df = preprocess_raw_data(raw_df)
             
         st.success("✅ File uploaded and read successfully!")
@@ -297,11 +264,13 @@ if uploaded_file is not None:
         if st.button("🚀 Generate Training Data"):
             if not aggregation_types:
                 st.warning("Please select at least one aggregation type.")
+            elif not last_n_fights_list:
+                st.warning("Please select at least one 'Last N Fights' window.")
             else:
                 with st.spinner(f"Generating features... This may take a moment on the first run."):
-                    # Convert list to tuple for caching
                     agg_tuple = tuple(sorted(aggregation_types))
-                    st.session_state.training_df = create_training_data(st.session_state.raw_df, agg_tuple, last_n_fights, shuffle_perspectives)
+                    last_n_tuple = tuple(sorted(last_n_fights_list))
+                    st.session_state.training_df = create_training_data(st.session_state.raw_df, agg_tuple, last_n_tuple, shuffle_perspectives)
                 
                 st.success("🎉 Training data generated successfully!")
 
@@ -310,15 +279,15 @@ if uploaded_file is not None:
             st.subheader("Generated Training Data Preview")
             st.dataframe(training_df)
 
-            # --- Dynamic Download Button ---
             file_extension = st.session_state.file_type
             agg_str = '_'.join([agg.lower() for agg in aggregation_types])
-            file_name = f'train_data_{agg_str}_last_{last_n_fights}.{file_extension}'
+            last_n_str = '_'.join(map(str, last_n_fights_list))
+            file_name = f'train_data_{agg_str}_last_{last_n_str}.{file_extension}'
             
             if file_extension == 'csv':
                 data = training_df.to_csv(index=False).encode('utf-8')
                 mime = 'text/csv'
-            else: # xlsx
+            else:
                 output = BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     training_df.to_excel(writer, index=False, sheet_name='Sheet1')
@@ -332,10 +301,8 @@ if uploaded_file is not None:
                 mime=mime,
             )
 
-            # --- Filtered Column and Date View ---
             st.subheader("📊 Filtered View")
             
-            # Date Filter
             min_date = training_df['date'].min().date()
             max_date = training_df['date'].max().date()
             
@@ -345,7 +312,6 @@ if uploaded_file is not None:
             with col2:
                 end_date = st.date_input("End date", max_date, min_value=start_date, max_value=max_date)
 
-            # Column Filter
             select_all_cols = st.checkbox("Select All Columns")
             
             if select_all_cols:
@@ -357,27 +323,22 @@ if uploaded_file is not None:
                     default=[]
                 )
             
-            # Apply filters and display
             view_df = training_df
             
-            # Apply date filter
             start_date_ts = pd.to_datetime(start_date)
             end_date_ts = pd.to_datetime(end_date)
             date_mask = (view_df['date'] >= start_date_ts) & (view_df['date'] <= end_date_ts)
             view_df = view_df[date_mask]
 
-            # Check if any filter has been actively used
             date_filter_active = (start_date != min_date) or (end_date != max_date)
             cols_filter_active = bool(filtered_cols)
 
             if date_filter_active or cols_filter_active:
-                # If columns are selected, use them. Otherwise, show all columns.
                 display_cols = filtered_cols if cols_filter_active else training_df.columns.tolist()
                 st.dataframe(view_df[display_cols])
             else:
                  st.info("Select columns or change the date range to see a filtered view.")
             
-            # --- Fighter Analysis Section ---
             st.subheader("🔍 Fighter Analysis")
             fighters = sorted(training_df['fighter_x_name'].unique())
             
@@ -388,7 +349,6 @@ if uploaded_file is not None:
                 fighter2 = st.selectbox("Select Fighter 2", fighters, index=None, placeholder="Select fighter...")
 
             if fighter1 and fighter2 and fighter1 != fighter2:
-                # Find the last fight between them
                 fight_history = training_df[
                     ((training_df['fighter_x_name'] == fighter1) & (training_df['fighter_y_name'] == fighter2)) |
                     ((training_df['fighter_x_name'] == fighter2) & (training_df['fighter_y_name'] == fighter1))
@@ -398,12 +358,10 @@ if uploaded_file is not None:
                     last_fight = fight_history.sort_values('date', ascending=False).iloc[0:1]
                     st.write(f"#### Head-to-Head: Last Matchup")
                     
-                    # Ensure fighter1 is always fighter_x for consistent display
                     fighter1_perspective = last_fight[last_fight['fighter_x_name'] == fighter1]
                     if fighter1_perspective.empty:
                          fighter1_perspective = last_fight[last_fight['fighter_y_name'] == fighter1].rename(columns=lambda c: c.replace('_y', '_temp').replace('_x', '_y').replace('_temp', '_x'))
 
-                    # Display all columns for the comparison
                     st.dataframe(fighter1_perspective)
                 else:
                     st.info(f"{fighter1} and {fighter2} have not fought in the selected dataset.")
